@@ -712,61 +712,55 @@ def get_load_shedding(rank, total_load):
     return 0
 
 def sample_severity():
-    """Generate synthetic severity labels"""
-    ts = make_timestamps()
-    rows = []
-    event_id = 1
+    """Sample severity labels for contingencies"""
+    global contingency_events, line_data, bus_data, generator_data, transformer_data
     
-    # Get total system load for reference
-    total_load = bus_data["LoadMW"].sum()
+    # Create severity labels DataFrame
+    severity_labels = pd.DataFrame(columns=[
+        "ContingencyID",
+        "SeverityScore",
+        "CriticalityLevel",
+        "ImpactDescription"
+    ])
     
-    for snap_id, t in enumerate(ts):
-        # Determine number of events for this snapshot (0-3)
-        n_events = np.random.choice([0, 1, 2, 3], p=[0.7, 0.2, 0.08, 0.02])
+    # Sample severity for each contingency
+    for _, event in tqdm(contingency_events.iterrows(), total=len(contingency_events), desc="Severity Labels"):
+        # Calculate base severity score
+        base_score = 0
         
-        for _ in range(n_events):
-            # Get severity rank
-            severity_rank = get_severity_rank()
-            
-            # Get severity metrics
-            metrics = get_severity_metrics(severity_rank)
-            
-            # Get VoLL
-            voll = get_voll(severity_rank)
-            
-            # Get economic impact
-            economic_impact = get_economic_impact(voll, metrics["restoration_time"])
-            
-            # Get weather impact
-            weather_id = np.random.randint(1, N_WEATHER + 1)
-            weather_impact = get_weather_impact(weather_id, t)
-            
-            # Get load shedding
-            load_shedding = get_load_shedding(severity_rank, total_load)
-            
-            # Determine if operator action is required
-            operator_action = "Yes" if severity_rank >= 2 or load_shedding > 0 else "No"
-            
-            rows.append({
-                "SnapshotID": snap_id,
-                "EventID": event_id,
-                "SeverityRank": severity_rank,
-                "MaxOverload_pct": metrics["overload_pct"],
-                "VoltageViolation_MaxDev_pu": metrics["voltage_dev"],
-                "EstimatedVoLL_CAD": voll,
-                "CascadingProbability_pct": metrics["cascading_prob"],
-                "RestorationTime_min": metrics["restoration_time"],
-                "LoadSheddingAmount_MW": load_shedding,
-                "EconomicImpact_CAD": economic_impact,
-                "CriticalityLevel": severity_rank,  # Using severity rank as criticality level
-                "WeatherImpactFlag": weather_impact,
-                "OperatorActionRequired": operator_action,
-                "LabelTimestamp": t
-            })
-            
-            event_id += 1
+        # Add impact based on component type
+        if event["ElementType"] == "Line":
+            line = line_data[line_data["LineID"] == event["ElementID"]].iloc[0]
+            base_score += line["Capacity_MW"] / 100  # Normalize by 100 MW
+            base_score += line["CriticalityLevel"] * 0.5  # Add criticality impact
+        elif event["ElementType"] == "Bus":
+            bus = bus_data[bus_data["BusID"] == event["ElementID"]].iloc[0]
+            base_score += bus["Load_MW"] / 100  # Normalize by 100 MW
+            base_score += 0.3  # Base impact for bus contingencies
+        
+        # Add random variation
+        severity_score = base_score * np.random.uniform(0.8, 1.2)
+        
+        # Determine criticality level based on severity score
+        if severity_score < 0.5:
+            rank = 1  # Low
+        elif severity_score < 1.0:
+            rank = 2  # Medium
+        else:
+            rank = 3  # High
+        
+        # Generate impact description
+        impact_desc = f"Impact level {rank} with severity score {severity_score:.2f}"
+        
+        # Add to DataFrame
+        severity_labels = pd.concat([severity_labels, pd.DataFrame([{
+            "ContingencyID": event["EventID"],
+            "SeverityScore": severity_score,
+            "CriticalityLevel": rank,
+            "ImpactDescription": impact_desc
+        }])], ignore_index=True)
     
-    return pd.DataFrame(rows)
+    return severity_labels
 
 def find_islands(bus_pairs, line_status):
     """Find all islands in the network using DFS"""
@@ -2048,63 +2042,55 @@ def sample_contingency_events():
     return pd.DataFrame(rows)
 
 def sample_severity():
-    """Generate synthetic severity labels"""
-    ts = make_timestamps()
-    rows = []
+    """Sample severity labels for contingencies"""
+    global contingency_events, line_data, bus_data, generator_data, transformer_data
     
-    print("Generating severity labels...")
-    for snap_id, t in tqdm(enumerate(ts), total=len(ts), desc="Severity Labels"):
-        # Get current contingency events
-        current_events = contingency_events[contingency_events["SnapshotID"] == snap_id]
+    # Create severity labels DataFrame
+    severity_labels = pd.DataFrame(columns=[
+        "ContingencyID",
+        "SeverityScore",
+        "CriticalityLevel",
+        "ImpactDescription"
+    ])
+    
+    # Sample severity for each contingency
+    for _, event in tqdm(contingency_events.iterrows(), total=len(contingency_events), desc="Severity Labels"):
+        # Calculate base severity score
+        base_score = 0
         
-        for _, event in current_events.iterrows():
-            # Get severity rank
-            severity_rank = get_severity_rank()
-            
-            # Get severity metrics
-            metrics = get_severity_metrics(severity_rank)
-            
-            # Get VoLL
-            voll = get_voll(severity_rank)
-            
-            # Get economic impact
-            economic_impact = get_economic_impact(voll, metrics["restoration_time"])
-            
-            # Get weather impact
-            weather_impact = get_weather_impact(event["WeatherImpact"], t)
-            
-            # Get load shedding
-            if event["ElementType"] == "Bus":
-                element_load = bus_data[
-                    (bus_data["SnapshotID"] == snap_id) & 
-                    (bus_data["BusID"] == event["ElementID"])
-                ]["Load_MW"].iloc[0]
-            else:
-                element_load = line_data[
-                    (line_data["SnapshotID"] == snap_id) & 
-                    (line_data["LineID"] == event["ElementID"])
-                ]["PowerFlow_MW"].iloc[0]
-            
-            load_shedding = get_load_shedding(severity_rank, element_load)
-            
-            rows.append({
-                "SnapshotID": snap_id,
-                "EventID": event["EventID"],
-                "SeverityRank": severity_rank,
-                "MaxOverload_pct": metrics["overload_pct"],
-                "VoltageViolation_MaxDev_pu": metrics["voltage_dev"],
-                "EstimatedVoLL_CAD": voll,
-                "CascadingProbability_pct": metrics["cascading_prob"],
-                "RestorationTime_min": metrics["restoration_time"],
-                "LoadSheddingAmount_MW": load_shedding,
-                "EconomicImpact_CAD": economic_impact,
-                "CriticalityLevel": rank,
-                "WeatherImpactFlag": weather_impact,
-                "OperatorActionRequired": 1 if rank >= 2 or load_shedding > 0 else 0,
-                "LabelTimestamp": t
-            })
+        # Add impact based on component type
+        if event["ElementType"] == "Line":
+            line = line_data[line_data["LineID"] == event["ElementID"]].iloc[0]
+            base_score += line["Capacity_MW"] / 100  # Normalize by 100 MW
+            base_score += line["CriticalityLevel"] * 0.5  # Add criticality impact
+        elif event["ElementType"] == "Bus":
+            bus = bus_data[bus_data["BusID"] == event["ElementID"]].iloc[0]
+            base_score += bus["Load_MW"] / 100  # Normalize by 100 MW
+            base_score += 0.3  # Base impact for bus contingencies
+        
+        # Add random variation
+        severity_score = base_score * np.random.uniform(0.8, 1.2)
+        
+        # Determine criticality level based on severity score
+        if severity_score < 0.5:
+            rank = 1  # Low
+        elif severity_score < 1.0:
+            rank = 2  # Medium
+        else:
+            rank = 3  # High
+        
+        # Generate impact description
+        impact_desc = f"Impact level {rank} with severity score {severity_score:.2f}"
+        
+        # Add to DataFrame
+        severity_labels = pd.concat([severity_labels, pd.DataFrame([{
+            "ContingencyID": event["EventID"],
+            "SeverityScore": severity_score,
+            "CriticalityLevel": rank,
+            "ImpactDescription": impact_desc
+        }])], ignore_index=True)
     
-    return pd.DataFrame(rows)
+    return severity_labels
 
 def sample_topology_meta():
     """Generate synthetic topology metadata"""

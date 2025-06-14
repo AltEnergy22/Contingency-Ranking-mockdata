@@ -731,7 +731,7 @@ def sample_severity():
         # Add impact based on component type
         if event["ElementType"] == "Line":
             line = line_data[line_data["LineID"] == event["ElementID"]].iloc[0]
-            base_score += line["Capacity_MW"] / 100  # Normalize by 100 MW
+            base_score += line["ThermalLimit_MW"] / 100  # Normalize by 100 MW
             base_score += line["CriticalityLevel"] * 0.5  # Add criticality impact
         elif event["ElementType"] == "Bus":
             bus = bus_data[bus_data["BusID"] == event["ElementID"]].iloc[0]
@@ -2061,7 +2061,7 @@ def sample_severity():
         # Add impact based on component type
         if event["ElementType"] == "Line":
             line = line_data[line_data["LineID"] == event["ElementID"]].iloc[0]
-            base_score += line["Capacity_MW"] / 100  # Normalize by 100 MW
+            base_score += line["ThermalLimit_MW"] / 100  # Normalize by 100 MW
             base_score += line["CriticalityLevel"] * 0.5  # Add criticality impact
         elif event["ElementType"] == "Bus":
             bus = bus_data[bus_data["BusID"] == event["ElementID"]].iloc[0]

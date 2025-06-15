@@ -20,7 +20,11 @@ N_BUSES = 100  # Number of buses
 BASE_TIMESTAMP = pd.Timestamp("2025-01-01")
 
 def make_timestamps():
-    return [BASE_TIMESTAMP + pd.Timedelta(minutes=i) for i in range(N_SNAPSHOTS)]
+    """Generate timestamps for one week of data at 1-minute intervals"""
+    start_time = pd.Timestamp("2024-01-01 00:00:00")
+    # Reduce to 1 day of data instead of 1 week
+    end_time = start_time + pd.Timedelta(days=1)
+    return pd.date_range(start=start_time, end=end_time, freq="1min")
 
 def get_diurnal_load_factor(timestamp):
     """Calculate diurnal load factor based on time of day"""
@@ -839,40 +843,36 @@ def sample_topology_meta():
     ts = make_timestamps()
     rows = []
     
-    for snap_id, t in enumerate(ts):
-        # Get line statuses
+    # Pre-compute bus pairs once
+    bus_pairs = generate_bus_pairs()
+    
+    print("Generating topology metadata...")
+    for snap_id, t in tqdm(enumerate(ts), total=len(ts), desc="Topology Meta"):
+        # Get current line statuses
+        current_lines = line_data[line_data["SnapshotID"] == snap_id]
         line_status = {
             (row["FromBusID"], row["ToBusID"]): row["Status"]
-            for _, row in line_data.iterrows()
+            for _, row in current_lines.iterrows()
         }
         
-        # Find islands
-        bus_pairs = generate_bus_pairs()
-        islands = find_islands(bus_pairs, line_status)
-        num_islands = len(islands)
+        # Simplified island detection
+        active_connections = [(f, t) for (f, t), status in line_status.items() if status == 1]
+        if not active_connections:
+            num_islands = N_BUSES  # Each bus is its own island
+            min_cut = 0
+        else:
+            # Count connected components using a simplified approach
+            connected = set()
+            for f, t in active_connections:
+                connected.add(f)
+                connected.add(t)
+            num_islands = N_BUSES - len(connected) + 1
+            min_cut = len([(f, t) for (f, t), status in line_status.items() if status == 0])
         
-        # Calculate minimum cut size
-        min_cut = calculate_min_cut_size(bus_pairs, line_status, num_islands)
-        
-        # Get line loadings
-        line_loadings = {
-            row["LineID"]: get_line_loading(
-                row["LineID"],
-                np.random.uniform(0, row["ThermalLimit_MW"]),
-                row["ThermalLimit_MW"]
-            )
-            for _, row in line_data.iterrows()
-        }
-        
-        # Get voltage violations
-        bus_voltages = {
-            row["BusID"]: np.random.uniform(0.95, 1.05)
-            for _, row in bus_data.iterrows()
-        }
-        voltage_violations = get_voltage_violations(bus_voltages)
-        
-        # Get overloads
-        overloads = get_overloads(line_loadings)
+        # Simplified line loadings and voltage calculations
+        max_loading = current_lines["PowerFlow_MW"].max() / current_lines["ThermalLimit_MW"].max() * 100 if not current_lines.empty else 0
+        voltage_violations = sum(1 for v in current_lines["FromVoltage_pu"] if v < 0.95 or v > 1.05)
+        overloads = sum(1 for loading in current_lines["PowerFlow_MW"] / current_lines["ThermalLimit_MW"] if loading > 0.9)
         
         # Check for bad data
         bad_data = 1 if np.random.random() < 0.01 else 0  # 1% chance of bad data
@@ -882,7 +882,7 @@ def sample_topology_meta():
             "Timestamp": t,
             "NumberOfIslands": num_islands,
             "MinimumCutSize": min_cut,
-            "MaxLineLoading_pct": max(line_loadings.values()) if line_loadings else 0,
+            "MaxLineLoading_pct": max_loading,
             "VoltageViolations": voltage_violations,
             "OverloadedLines": overloads,
             "BadDataFlag": bad_data
@@ -1831,44 +1831,67 @@ def sample_column_definitions():
     return pd.DataFrame(definitions)
 
 def main():
-    global bus_data, line_data, switch_data, measurement_data, contingency_events
-    global severity_labels, topology_meta, weather_data, area_meta, column_definitions
-    print("Generating synthetic grid contingency data...")
+    """Main function to generate synthetic data"""
+    global bus_data, line_data, switch_data, measurement_data, weather_data
+    global contingency_events, severity_labels, topology_meta, area_meta, column_definitions
     
-    # Phase 1: Generate base data
-    print("\nGenerating base data...")
+    print("Generating synthetic grid contingency data...\n")
+    
+    print("Generating base data...\n")
+    
+    # Generate base data with reduced size
     bus_data = sample_bus_data()
     line_data = sample_line_data()
     switch_data = sample_switch_data()
     
-    # Phase 2: Generate dependent data
     print("\nGenerating dependent data...")
+    # Generate dependent data
     measurement_data = sample_measurement_data()
-    weather_data = sample_weather()  # Generate weather data before contingencies
+    weather_data = sample_weather()
     contingency_events = sample_contingency_events()
     severity_labels = sample_severity()
     topology_meta = sample_topology_meta()
     area_meta = sample_area_meta()
-    column_definitions = generate_column_definitions()
+    column_definitions = sample_column_definitions()
     
     # Save to Excel
     print("\nSaving data to Excel...")
+    print("This may take a few minutes...")
+    
+    # First, save smaller datasets
     with pd.ExcelWriter("SyntheticGridContingencies.xlsx", engine='openpyxl') as writer:
+        print("Saving small datasets...")
         bus_data.to_excel(writer, sheet_name="BusData", index=False)
-        line_data.to_excel(writer, sheet_name="LineData", index=False)
         switch_data.to_excel(writer, sheet_name="SwitchData", index=False)
-        measurement_data.to_excel(writer, sheet_name="MeasurementData", index=False)
         contingency_events.to_excel(writer, sheet_name="ContingencyEvents", index=False)
         severity_labels.to_excel(writer, sheet_name="SeverityLabels", index=False)
         topology_meta.to_excel(writer, sheet_name="TopologyMeta", index=False)
         weather_data.to_excel(writer, sheet_name="WeatherData", index=False)
         area_meta.to_excel(writer, sheet_name="AreaMeta", index=False)
         column_definitions.to_excel(writer, sheet_name="ColumnDefinitions", index=False)
+        
+        # Then save large datasets in smaller chunks
+        print("Saving line data...")
+        chunk_size = 100000  # Reduced chunk size
+        line_chunks = np.array_split(line_data, len(line_data) // chunk_size + 1)
+        for i, chunk in enumerate(line_chunks):
+            print(f"Saving line data chunk {i+1}/{len(line_chunks)}...")
+            sheet_name = f"LineData_{i+1}" if i > 0 else "LineData"
+            chunk.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        print("Saving measurement data...")
+        measurement_chunks = np.array_split(measurement_data, len(measurement_data) // chunk_size + 1)
+        for i, chunk in enumerate(measurement_chunks):
+            print(f"Saving measurement data chunk {i+1}/{len(measurement_chunks)}...")
+            sheet_name = f"MeasurementData_{i+1}" if i > 0 else "MeasurementData"
+            chunk.to_excel(writer, sheet_name=sheet_name, index=False)
     
     print("\nData generation complete! File saved as 'SyntheticGridContingencies.xlsx'")
 
 def sample_measurement_data():
     """Generate synthetic measurement data"""
+    global line_data, bus_data
+    
     ts = make_timestamps()
     rows = []
     
@@ -2097,41 +2120,36 @@ def sample_topology_meta():
     ts = make_timestamps()
     rows = []
     
+    # Pre-compute bus pairs once
+    bus_pairs = generate_bus_pairs()
+    
     print("Generating topology metadata...")
     for snap_id, t in tqdm(enumerate(ts), total=len(ts), desc="Topology Meta"):
-        # Get line statuses
+        # Get current line statuses
+        current_lines = line_data[line_data["SnapshotID"] == snap_id]
         line_status = {
             (row["FromBusID"], row["ToBusID"]): row["Status"]
-            for _, row in line_data.iterrows()
+            for _, row in current_lines.iterrows()
         }
         
-        # Find islands
-        bus_pairs = generate_bus_pairs()
-        islands = find_islands(bus_pairs, line_status)
-        num_islands = len(islands)
+        # Simplified island detection
+        active_connections = [(f, t) for (f, t), status in line_status.items() if status == 1]
+        if not active_connections:
+            num_islands = N_BUSES  # Each bus is its own island
+            min_cut = 0
+        else:
+            # Count connected components using a simplified approach
+            connected = set()
+            for f, t in active_connections:
+                connected.add(f)
+                connected.add(t)
+            num_islands = N_BUSES - len(connected) + 1
+            min_cut = len([(f, t) for (f, t), status in line_status.items() if status == 0])
         
-        # Calculate minimum cut size
-        min_cut = calculate_min_cut_size(bus_pairs, line_status, num_islands)
-        
-        # Get line loadings
-        line_loadings = {
-            row["LineID"]: get_line_loading(
-                row["LineID"],
-                np.random.uniform(0, row["ThermalLimit_MW"]),
-                row["ThermalLimit_MW"]
-            )
-            for _, row in line_data.iterrows()
-        }
-        
-        # Get voltage violations
-        bus_voltages = {
-            row["BusID"]: np.random.uniform(0.95, 1.05)
-            for _, row in bus_data.iterrows()
-        }
-        voltage_violations = get_voltage_violations(bus_voltages)
-        
-        # Get overloads
-        overloads = get_overloads(line_loadings)
+        # Simplified line loadings and voltage calculations
+        max_loading = current_lines["PowerFlow_MW"].max() / current_lines["ThermalLimit_MW"].max() * 100 if not current_lines.empty else 0
+        voltage_violations = sum(1 for v in current_lines["FromVoltage_pu"] if v < 0.95 or v > 1.05)
+        overloads = sum(1 for loading in current_lines["PowerFlow_MW"] / current_lines["ThermalLimit_MW"] if loading > 0.9)
         
         # Check for bad data
         bad_data = 1 if np.random.random() < 0.01 else 0  # 1% chance of bad data
@@ -2141,7 +2159,7 @@ def sample_topology_meta():
             "Timestamp": t,
             "NumberOfIslands": num_islands,
             "MinimumCutSize": min_cut,
-            "MaxLineLoading_pct": max(line_loadings.values()) if line_loadings else 0,
+            "MaxLineLoading_pct": max_loading,
             "VoltageViolations": voltage_violations,
             "OverloadedLines": overloads,
             "BadDataFlag": bad_data
